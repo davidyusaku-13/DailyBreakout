@@ -224,6 +224,10 @@ void CalculateDailyRange()
    if (current_time < g_range_end_time)
       return;
 
+   // Exit early if range already calculated (avoid re-scanning bars on every tick)
+   if (g_range_calculated)
+      return;
+
    // Calculate the high and low of the range
    g_high_price = 0;
    g_low_price = 99999999;
