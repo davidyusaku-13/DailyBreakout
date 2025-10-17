@@ -8,11 +8,7 @@
 
 // Include required libraries
 #include <Trade\Trade.mqh>
-#include <BalanceRegression\BalanceRegression.mqh>
 CTrade trade;
-
-// Balance regression object
-CBalanceRegression g_balance_regression;
 
 // Input Parameters
 input int magic_number = 12345;                        // Magic Number
@@ -101,37 +97,6 @@ void OnDeinit(const int reason)
       Print("Minimum range during backtest: ", g_min_range_ever, " points on ", TimeToString(g_min_range_date));
       Print("======================");
    }
-}
-
-//+------------------------------------------------------------------+
-//| Tester function - Custom optimization criterion                  |
-//+------------------------------------------------------------------+
-double OnTester()
-{
-   // Set up balance regression object for this test
-   double initial_deposit = TesterStatistics(STAT_INITIAL_DEPOSIT);
-   g_balance_regression.SetStartBalance(initial_deposit);
-   g_balance_regression.SetFromDate(0); // from the beginning
-   g_balance_regression.SetVolumeNormalization(false); // or true if you want volume normalization
-
-   // Calculate Sharpe Ratio and ProfitStability
-   double sharpe = g_balance_regression.GetSharpeRatio();
-   double profit_stability = g_balance_regression.GetProfitStability(TimeCurrent());
-   double balance = TesterStatistics(STAT_PROFIT) + initial_deposit;
-
-   // Custom criterion: prioritize Sharpe Ratio, then balance
-   // You can adjust the weights as needed
-   double score = sharpe * 1000.0 + balance;
-
-   Print("=== OnTester Results (Sharpe & Balance) ===");
-   Print("Initial Deposit: ", initial_deposit);
-   Print("Final Balance: ", balance);
-   Print("Sharpe Ratio: ", sharpe);
-   Print("ProfitStability: ", profit_stability);
-   Print("Custom Score: ", score);
-   Print("=========================================");
-
-   return score;
 }
 
 //+------------------------------------------------------------------+
