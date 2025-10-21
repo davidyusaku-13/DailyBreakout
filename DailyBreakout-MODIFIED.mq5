@@ -14,10 +14,10 @@ CTrade trade;
 input int magic_number = 12345;                        // Magic Number
 input bool autolot = true;                             // Use autolot based on balance
 input double base_balance = 100.0;                     // Base balance for lot calculation
-input double lot = 0.01;                               // Lot size for each base_balance unit
+input double base_lot = 0.01;                          // Base lot size for autolot calculation
 input double min_lot = 0.01;                           // Minimum lot size
 input double max_lot = 10.0;                           // Maximum lot size
-input double risk_percentage = 1.0;                    // Risk percentage of account balance (minimum 1%, required for SL)
+input int risk_percentage = 2;                         // Risk Percentage of account balance for SL (0=off)
 input int take_profit = 0;                             // Take Profit in % of the range (0=off)
 input int range_start_time = 90;                       // Range start time in minutes
 input int range_duration = 270;                        // Range duration in minutes
@@ -57,34 +57,17 @@ double g_max_range_ever = 0;      // Track maximum range seen
 double g_min_range_ever = 999999; // Track minimum range seen
 datetime g_max_range_date = 0;    // Date of maximum range
 datetime g_min_range_date = 0;    // Date of minimum range
-bool g_one_breakout_per_range = false; // Cached breakout mode flag
-double g_risk_percentage = 1.0;   // Validated risk percentage (minimum 1%)
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   // Validate risk percentage - MUST be at least 1%
-   if (risk_percentage < 1.0)
-   {
-      Print("ERROR: risk_percentage must be at least 1%. Current value: ", risk_percentage);
-      g_risk_percentage = 1.0;
-      Print("Automatically set to minimum 1.0%");
-   }
-   else
-   {
-      g_risk_percentage = risk_percentage;
-   }
-
    // Initialize
    g_range_calculated = false;
    g_orders_placed = false;
    g_lines_drawn = false;
    g_trailing_points = trailing_stop;
-
-   // Cache breakout mode to avoid repeated string comparisons
-   g_one_breakout_per_range = (StringCompare(breakout_mode, "one breakout per range") == 0);
 
    // Set current day
    MqlDateTime dt;
@@ -241,40 +224,29 @@ void CalculateDailyRange()
    if (current_time < g_range_end_time)
       return;
 
-   // Calculate the high and low of the range using optimized iHighest/iLowest
+   // Calculate the high and low of the range
    g_high_price = 0;
    g_low_price = 99999999;
 
-   // Find the index of the highest and lowest bars within the range period
-   // Use true (less-than-or-equal mode) to find nearest bar at or before specified time
-   int start_bar = iBarShift(_Symbol, PERIOD_M1, g_range_start_time, true);
-   int end_bar = iBarShift(_Symbol, PERIOD_M1, g_range_end_time, true);
+   int bars_to_check = range_duration / PeriodSeconds(PERIOD_M1) * 60;
+   if (bars_to_check > Bars(_Symbol, PERIOD_M1))
+      bars_to_check = Bars(_Symbol, PERIOD_M1);
 
-   // Validate we have valid bar indices with historical data
-   if (start_bar < 0 || end_bar < 0)
+   for (int i = 0; i < bars_to_check; i++)
    {
-      Print("Not enough historical data for range calculation. start_bar: ", start_bar, ", end_bar: ", end_bar);
-      return;
-   }
+      datetime bar_time = iTime(_Symbol, PERIOD_M1, i);
 
-   // Ensure correct order (start_bar should be higher index than end_bar in MQL5)
-   if (start_bar < end_bar)
-   {
-      int temp = start_bar;
-      start_bar = end_bar;
-      end_bar = temp;
-   }
+      // Check if the bar is within our range time
+      if (bar_time >= g_range_start_time && bar_time <= g_range_end_time)
+      {
+         double bar_high = iHigh(_Symbol, PERIOD_M1, i);
+         if (bar_high > g_high_price)
+            g_high_price = bar_high;
 
-   // Use iHighest and iLowest to find extremes within the range
-   if (end_bar <= start_bar)
-   {
-      int highest_bar = iHighest(_Symbol, PERIOD_M1, MODE_HIGH, start_bar - end_bar + 1, end_bar);
-      int lowest_bar = iLowest(_Symbol, PERIOD_M1, MODE_LOW, start_bar - end_bar + 1, end_bar);
-
-      if (highest_bar >= 0)
-         g_high_price = iHigh(_Symbol, PERIOD_M1, highest_bar);
-      if (lowest_bar >= 0)
-         g_low_price = iLow(_Symbol, PERIOD_M1, lowest_bar);
+         double bar_low = iLow(_Symbol, PERIOD_M1, i);
+         if (bar_low < g_low_price)
+            g_low_price = bar_low;
+      }
    }
 
    // Mark range as calculated
@@ -305,7 +277,7 @@ void CalculateDailyRange()
 }
 
 //+------------------------------------------------------------------+
-//| Calculate lot size based on the settings (independent of risk)  |
+//| Calculate lot size based on the settings                         |
 //+------------------------------------------------------------------+
 double CalculateLotSize(double range_size)
 {
@@ -315,7 +287,7 @@ double CalculateLotSize(double range_size)
 
       // Calculate lot size proportional to account balance
       double balance_ratio = account_balance / base_balance;
-      double lot_size = NormalizeDouble(balance_ratio * lot, 2);
+      double lot_size = NormalizeDouble(balance_ratio * base_lot, 2);
 
       // Apply min/max limits
       if (lot_size < min_lot)
@@ -324,38 +296,14 @@ double CalculateLotSize(double range_size)
          lot_size = max_lot;
 
       Print("Autolot calculation - Balance: ", account_balance, ", Base balance: ", base_balance,
-            ", Balance ratio: ", balance_ratio, ", Base lot: ", lot, ", Calculated lot: ", lot_size);
+            ", Balance ratio: ", balance_ratio, ", Base lot: ", base_lot, ", Calculated lot: ", lot_size);
 
       return lot_size;
    }
    else // Fixed lot size
    {
-      return lot; // Use lot as fixed lot value
+      return base_lot; // Use base_lot as fixed lot value
    }
-}
-
-//+------------------------------------------------------------------+
-//| Calculate SL distance based on mandatory risk percentage         |
-//+------------------------------------------------------------------+
-double CalculateSLDistance(double lot_size)
-{
-   double account_balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double risk_amount = account_balance * g_risk_percentage / 100.0;
-
-   // Get tick value and size for accurate point value calculation
-   double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double point_value = tick_value / tick_size * _Point;
-
-   // Calculate SL distance in points
-   double sl_distance_points = risk_amount / (lot_size * point_value);
-
-   Print("SL Distance Calculation - Risk %: ", g_risk_percentage,
-         ", Risk Amount: ", risk_amount,
-         ", Lot Size: ", lot_size,
-         ", SL Distance: ", sl_distance_points, " points");
-
-   return sl_distance_points;
 }
 
 //+------------------------------------------------------------------+
@@ -391,16 +339,22 @@ void PlacePendingOrders()
       return;
    }
 
-   // Calculate lot size (independent of risk)
    g_lot_size = CalculateLotSize(range_size);
 
-   // Calculate SL distance based on mandatory risk percentage
-   double sl_distance_points = CalculateSLDistance(g_lot_size);
-   double buy_sl = g_high_price - sl_distance_points * _Point;
-   double sell_sl = g_low_price + sl_distance_points * _Point;
+   // Calculate SL and TP
+   double buy_sl = 0, buy_tp = 0, sell_sl = 0, sell_tp = 0;
 
-   // Calculate TP (if enabled)
-   double buy_tp = 0, sell_tp = 0;
+   if (risk_percentage > 0)
+   {
+      // Calculate SL based on account balance percentage
+      double account_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+      double risk_amount = account_balance * risk_percentage / 100;
+      double risk_pips = risk_amount / g_lot_size / _Point;
+      
+      buy_sl = g_high_price - risk_pips * _Point;
+      sell_sl = g_low_price + risk_pips * _Point;
+   }
+
    if (take_profit > 0)
    {
       buy_tp = g_high_price + (range_size * take_profit / 100);
@@ -422,24 +376,12 @@ void PlacePendingOrders()
 
    if (buy_success)
    {
-      ulong buy_ticket = trade.ResultOrder();
-
-      // Confirm order was placed successfully
-      if (buy_ticket > 0 && OrderSelect(buy_ticket))
-      {
-         g_buy_ticket = buy_ticket;
-         Print("Buy Stop order CONFIRMED - Ticket: ", buy_ticket, ", Price: ", g_high_price, ", Lot: ", g_lot_size);
-      }
-      else
-      {
-         Print("Buy Stop placed but FAILED to confirm. Ticket: ", buy_ticket);
-         g_buy_ticket = 0;
-      }
+      g_buy_ticket = trade.ResultOrder();
+      Print("Buy Stop order placed at ", g_high_price, " with lot size ", g_lot_size);
    }
    else
    {
       Print("Failed to place Buy Stop order. Error: ", trade.ResultRetcode(), ", ", trade.ResultRetcodeDescription());
-      g_buy_ticket = 0;
    }
 
    // Place sell stop order at the low of the range
@@ -455,24 +397,12 @@ void PlacePendingOrders()
 
    if (sell_success)
    {
-      ulong sell_ticket = trade.ResultOrder();
-
-      // Confirm order was placed successfully
-      if (sell_ticket > 0 && OrderSelect(sell_ticket))
-      {
-         g_sell_ticket = sell_ticket;
-         Print("Sell Stop order CONFIRMED - Ticket: ", sell_ticket, ", Price: ", g_low_price, ", Lot: ", g_lot_size);
-      }
-      else
-      {
-         Print("Sell Stop placed but FAILED to confirm. Ticket: ", sell_ticket);
-         g_sell_ticket = 0;
-      }
+      g_sell_ticket = trade.ResultOrder();
+      Print("Sell Stop order placed at ", g_low_price, " with lot size ", g_lot_size);
    }
    else
    {
       Print("Failed to place Sell Stop order. Error: ", trade.ResultRetcode(), ", ", trade.ResultRetcodeDescription());
-      g_sell_ticket = 0;
    }
 
    g_orders_placed = true;
@@ -484,64 +414,80 @@ void PlacePendingOrders()
 void ManageOrders()
 {
    // If using "one breakout per range" mode, check if one order has been triggered
-   if (g_one_breakout_per_range)
+   if (StringCompare(breakout_mode, "one breakout per range") == 0)
    {
       bool buy_triggered = false;
       bool sell_triggered = false;
 
-      // Check buy order/position status
-      ENUM_ORDER_TYPE buy_order_type = ORDER_TYPE_BUY_STOP; // Default pending type
+      // Get order information
       if (g_buy_ticket > 0)
       {
+         // Check if the order still exists and if it's a market order (was triggered)
          if (OrderSelect(g_buy_ticket))
          {
-            buy_order_type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
-            if (buy_order_type == ORDER_TYPE_BUY) // Market order = triggered
-               buy_triggered = true;
-         }
-         else if (PositionSelectByTicket(g_buy_ticket))
-         {
-            if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+            ENUM_ORDER_TYPE order_type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+            if (order_type == ORDER_TYPE_BUY) // Changed from pending to market = triggered
                buy_triggered = true;
          }
          else
          {
-            g_buy_ticket = 0; // Order/position no longer exists
+            // Check if it became a position (was triggered and is still open)
+            if (PositionSelectByTicket(g_buy_ticket))
+            {
+               if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+                  buy_triggered = true;
+            }
+            else
+            {
+               g_buy_ticket = 0; // Order no longer exists
+            }
          }
       }
 
-      // Check sell order/position status
-      ENUM_ORDER_TYPE sell_order_type = ORDER_TYPE_SELL_STOP; // Default pending type
+      // Check if sell stop order has been triggered
       if (g_sell_ticket > 0)
       {
+         // Check if the order still exists and if it's a market order (was triggered)
          if (OrderSelect(g_sell_ticket))
          {
-            sell_order_type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
-            if (sell_order_type == ORDER_TYPE_SELL) // Market order = triggered
-               sell_triggered = true;
-         }
-         else if (PositionSelectByTicket(g_sell_ticket))
-         {
-            if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+            ENUM_ORDER_TYPE order_type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+            if (order_type == ORDER_TYPE_SELL) // Changed from pending to market = triggered
                sell_triggered = true;
          }
          else
          {
-            g_sell_ticket = 0; // Order/position no longer exists
+            // Check if it became a position (was triggered and is still open)
+            if (PositionSelectByTicket(g_sell_ticket))
+            {
+               if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+                  sell_triggered = true;
+            }
+            else
+            {
+               g_sell_ticket = 0; // Order no longer exists
+            }
          }
       }
 
       // If one order has been triggered, delete the other pending order
       if (buy_triggered && g_sell_ticket > 0)
       {
-         if (sell_order_type == ORDER_TYPE_SELL_STOP)
-            trade.OrderDelete(g_sell_ticket);
+         if (OrderSelect(g_sell_ticket))
+         {
+            ENUM_ORDER_TYPE order_type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+            if (order_type == ORDER_TYPE_SELL_STOP)
+               trade.OrderDelete(g_sell_ticket);
+         }
          g_sell_ticket = 0;
       }
       else if (sell_triggered && g_buy_ticket > 0)
       {
-         if (buy_order_type == ORDER_TYPE_BUY_STOP)
-            trade.OrderDelete(g_buy_ticket);
+         if (OrderSelect(g_buy_ticket))
+         {
+            ENUM_ORDER_TYPE order_type = (ENUM_ORDER_TYPE)OrderGetInteger(ORDER_TYPE);
+            if (order_type == ORDER_TYPE_BUY_STOP)
+               trade.OrderDelete(g_buy_ticket);
+         }
          g_buy_ticket = 0;
       }
    }
@@ -706,4 +652,5 @@ void DeleteAllLines()
    ObjectDelete(0, g_start_line_name);
    ObjectDelete(0, g_end_line_name);
    ObjectDelete(0, g_close_line_name);
+   ChartRedraw();
 }
