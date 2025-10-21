@@ -57,6 +57,7 @@ double g_max_range_ever = 0;      // Track maximum range seen
 double g_min_range_ever = 999999; // Track minimum range seen
 datetime g_max_range_date = 0;    // Date of maximum range
 datetime g_min_range_date = 0;    // Date of minimum range
+datetime g_last_trailing_check = 0; // Track last trailing stop check to avoid over-processing
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -118,6 +119,7 @@ void OnTick()
       g_range_calculated = false;
       g_orders_placed = false;
       g_lines_drawn = false;
+      g_last_trailing_check = 0;
       g_current_day = today;
       DeleteAllLines();
    }
@@ -228,29 +230,29 @@ void CalculateDailyRange()
    g_high_price = 0;
    g_low_price = 99999999;
 
-   int bars_to_check = range_duration / PeriodSeconds(PERIOD_M1) * 60;
-   if (bars_to_check > Bars(_Symbol, PERIOD_M1))
-      bars_to_check = Bars(_Symbol, PERIOD_M1);
-
-   for (int i = 0; i < bars_to_check; i++)
+   int start_bar = iBarShift(_Symbol, PERIOD_M1, g_range_start_time, false);
+   int end_bar = iBarShift(_Symbol, PERIOD_M1, g_range_end_time, false);
+   
+   if (start_bar == -1 || end_bar == -1)
    {
-      datetime bar_time = iTime(_Symbol, PERIOD_M1, i);
+      Print("Error: Unable to find bars for range time period");
+      return;
+   }
 
-      // Check if the bar is within our range time
-      if (bar_time >= g_range_start_time && bar_time <= g_range_end_time)
-      {
-         double bar_high = iHigh(_Symbol, PERIOD_M1, i);
-         if (bar_high > g_high_price)
-            g_high_price = bar_high;
-
-         double bar_low = iLow(_Symbol, PERIOD_M1, i);
-         if (bar_low < g_low_price)
-            g_low_price = bar_low;
-      }
+   // Iterate from end_bar to start_bar (0 is the latest bar)
+   for (int i = end_bar; i <= start_bar; i++)
+   {
+      double bar_high = iHigh(_Symbol, PERIOD_M1, i);
+      double bar_low = iLow(_Symbol, PERIOD_M1, i);
+      
+      if (bar_high > g_high_price)
+         g_high_price = bar_high;
+      if (bar_low < g_low_price)
+         g_low_price = bar_low;
    }
 
    // Mark range as calculated
-   if (g_high_price > 0 && g_low_price < 99999999)
+   if (g_high_price > 0 && g_low_price < 99999999 && g_high_price > g_low_price)
    {
       g_range_calculated = true;
       double range_size = g_high_price - g_low_price;
@@ -346,13 +348,10 @@ void PlacePendingOrders()
 
    if (risk_percentage > 0)
    {
-      // Calculate SL based on account balance percentage
-      double account_balance = AccountInfoDouble(ACCOUNT_BALANCE);
-      double risk_amount = account_balance * risk_percentage / 100;
-      double risk_pips = risk_amount / g_lot_size / _Point;
-      
-      buy_sl = g_high_price - risk_pips * _Point;
-      sell_sl = g_low_price + risk_pips * _Point;
+      // Calculate SL as percentage of range size
+      // This ensures SL is always reasonable and tied to range mechanics
+      buy_sl = g_high_price - (range_size * risk_percentage / 100);
+      sell_sl = g_low_price + (range_size * risk_percentage / 100);
    }
 
    if (take_profit > 0)
@@ -535,6 +534,7 @@ void CloseAllOrders()
    g_orders_placed = false;
    g_buy_ticket = 0;
    g_sell_ticket = 0;
+   g_last_trailing_check = 0;
 }
 
 //+------------------------------------------------------------------+
@@ -544,6 +544,13 @@ void ManageTrailingStop()
 {
    if (trailing_stop <= 0 || trailing_start <= 0)
       return;
+
+   // Only check trailing stop once per minute bar (avoid over-processing on every tick)
+   datetime current_bar_time = iTime(_Symbol, PERIOD_M1, 0);
+   if (g_last_trailing_check == current_bar_time)
+      return;
+   
+   g_last_trailing_check = current_bar_time;
 
    // Check all open positions
    for (int i = 0; i < PositionsTotal(); i++)
