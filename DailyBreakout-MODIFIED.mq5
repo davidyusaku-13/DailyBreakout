@@ -58,6 +58,10 @@ double g_min_range_ever = 999999; // Track minimum range seen
 datetime g_max_range_date = 0;    // Date of maximum range
 datetime g_min_range_date = 0;    // Date of minimum range
 
+// Performance optimization variables
+int g_tick_counter = 0;            // Counter for throttling trailing stop
+int g_trailing_throttle = 20;      // Update trailing stop every N ticks
+
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
 //+------------------------------------------------------------------+
@@ -104,9 +108,13 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   // Check if day has changed
+   // Increment tick counter for throttling
+   g_tick_counter++;
+
+   // Check if day has changed (cache calculation)
+   datetime current_time = TimeCurrent();
    MqlDateTime dt;
-   TimeCurrent(dt);
+   TimeToStruct(current_time, dt);
    dt.hour = 0;
    dt.min = 0;
    dt.sec = 0;
@@ -119,11 +127,15 @@ void OnTick()
       g_orders_placed = false;
       g_lines_drawn = false;
       g_current_day = today;
-      DeleteAllLines();
+      g_tick_counter = 0; // Reset tick counter
+      
+      // Skip chart operations in backtest/optimization
+      if (MQLInfoInteger(MQL_VISUAL_MODE) || MQLInfoInteger(MQL_TESTER) == 0)
+         DeleteAllLines();
    }
 
-   // Check if it's a valid trading day
-   if (!IsTradingDay())
+   // Check if it's a valid trading day (use cached dt)
+   if (!IsTradingDay(dt))
       return;
 
    // Calculate daily range if not already done
@@ -134,9 +146,11 @@ void OnTick()
    }
 
    // Draw vertical lines for range times if not already drawn
+   // Skip chart operations in backtest (unless visual mode)
    if (!g_lines_drawn)
    {
-      DrawRangeLines();
+      if (MQLInfoInteger(MQL_VISUAL_MODE) || MQLInfoInteger(MQL_TESTER) == 0)
+         DrawRangeLines();
       g_lines_drawn = true;
    }
 
@@ -147,10 +161,11 @@ void OnTick()
       return;
    }
 
-   // Apply trailing stop to open positions if enabled
-   if (trailing_stop > 0)
+   // Apply trailing stop to open positions if enabled (throttled)
+   if (trailing_stop > 0 && g_tick_counter >= g_trailing_throttle)
    {
       ManageTrailingStop();
+      g_tick_counter = 0; // Reset counter after update
    }
 
    // Check if we should close all orders
@@ -167,10 +182,8 @@ void OnTick()
 //+------------------------------------------------------------------+
 //| Check if today is a valid trading day                            |
 //+------------------------------------------------------------------+
-bool IsTradingDay()
+bool IsTradingDay(MqlDateTime &dt)
 {
-   MqlDateTime dt;
-   TimeCurrent(dt);
    int day_of_week = dt.day_of_week;
 
    switch (day_of_week)
@@ -349,7 +362,8 @@ void PlacePendingOrders()
       // Calculate SL based on risk percentage of balance
       double account_balance = AccountInfoDouble(ACCOUNT_BALANCE);
       double risk_amount = account_balance * (risk_percentage / 100);
-      double sl_distance = risk_amount / (g_lot_size * ContractSize());
+      double contract_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
+      double sl_distance = risk_amount / (g_lot_size * contract_size);
       
       // For buy: SL below entry price (g_high_price)
       buy_sl = g_high_price - sl_distance;
