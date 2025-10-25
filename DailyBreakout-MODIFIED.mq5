@@ -14,10 +14,10 @@ CTrade trade;
 input int magic_number = 12345;                        // Magic Number
 input bool autolot = true;                             // Use autolot based on balance
 input double base_balance = 100.0;                     // Base balance for lot calculation
-input double base_lot = 0.01;                          // Base lot size for autolot calculation
+input double lot = 0.01;                               // Lot size for each base_balance unit
 input double min_lot = 0.01;                           // Minimum lot size
 input double max_lot = 10.0;                           // Maximum lot size
-input int risk_percentage = 2;                         // Risk Percentage of account balance for SL (0=off)
+input double risk_percentage = 1.0;                     // Risk percentage of balance (0=off)
 input int take_profit = 0;                             // Take Profit in % of the range (0=off)
 input int range_start_time = 90;                       // Range start time in minutes
 input int range_duration = 270;                        // Range duration in minutes
@@ -57,7 +57,6 @@ double g_max_range_ever = 0;      // Track maximum range seen
 double g_min_range_ever = 999999; // Track minimum range seen
 datetime g_max_range_date = 0;    // Date of maximum range
 datetime g_min_range_date = 0;    // Date of minimum range
-datetime g_last_trailing_check = 0; // Track last trailing stop check to avoid over-processing
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -119,7 +118,6 @@ void OnTick()
       g_range_calculated = false;
       g_orders_placed = false;
       g_lines_drawn = false;
-      g_last_trailing_check = 0;
       g_current_day = today;
       DeleteAllLines();
    }
@@ -230,29 +228,29 @@ void CalculateDailyRange()
    g_high_price = 0;
    g_low_price = 99999999;
 
-   int start_bar = iBarShift(_Symbol, PERIOD_M1, g_range_start_time, false);
-   int end_bar = iBarShift(_Symbol, PERIOD_M1, g_range_end_time, false);
-   
-   if (start_bar == -1 || end_bar == -1)
-   {
-      Print("Error: Unable to find bars for range time period");
-      return;
-   }
+   int bars_to_check = range_duration / PeriodSeconds(PERIOD_M1) * 60;
+   if (bars_to_check > Bars(_Symbol, PERIOD_M1))
+      bars_to_check = Bars(_Symbol, PERIOD_M1);
 
-   // Iterate from end_bar to start_bar (0 is the latest bar)
-   for (int i = end_bar; i <= start_bar; i++)
+   for (int i = 0; i < bars_to_check; i++)
    {
-      double bar_high = iHigh(_Symbol, PERIOD_M1, i);
-      double bar_low = iLow(_Symbol, PERIOD_M1, i);
-      
-      if (bar_high > g_high_price)
-         g_high_price = bar_high;
-      if (bar_low < g_low_price)
-         g_low_price = bar_low;
+      datetime bar_time = iTime(_Symbol, PERIOD_M1, i);
+
+      // Check if the bar is within our range time
+      if (bar_time >= g_range_start_time && bar_time <= g_range_end_time)
+      {
+         double bar_high = iHigh(_Symbol, PERIOD_M1, i);
+         if (bar_high > g_high_price)
+            g_high_price = bar_high;
+
+         double bar_low = iLow(_Symbol, PERIOD_M1, i);
+         if (bar_low < g_low_price)
+            g_low_price = bar_low;
+      }
    }
 
    // Mark range as calculated
-   if (g_high_price > 0 && g_low_price < 99999999 && g_high_price > g_low_price)
+   if (g_high_price > 0 && g_low_price < 99999999)
    {
       g_range_calculated = true;
       double range_size = g_high_price - g_low_price;
@@ -289,7 +287,7 @@ double CalculateLotSize(double range_size)
 
       // Calculate lot size proportional to account balance
       double balance_ratio = account_balance / base_balance;
-      double lot_size = NormalizeDouble(balance_ratio * base_lot, 2);
+      double lot_size = NormalizeDouble(balance_ratio * lot, 2);
 
       // Apply min/max limits
       if (lot_size < min_lot)
@@ -298,13 +296,13 @@ double CalculateLotSize(double range_size)
          lot_size = max_lot;
 
       Print("Autolot calculation - Balance: ", account_balance, ", Base balance: ", base_balance,
-            ", Balance ratio: ", balance_ratio, ", Base lot: ", base_lot, ", Calculated lot: ", lot_size);
+            ", Balance ratio: ", balance_ratio, ", Base lot: ", lot, ", Calculated lot: ", lot_size);
 
       return lot_size;
    }
    else // Fixed lot size
    {
-      return base_lot; // Use base_lot as fixed lot value
+      return lot; // Use lot as fixed lot value
    }
 }
 
@@ -348,10 +346,18 @@ void PlacePendingOrders()
 
    if (risk_percentage > 0)
    {
-      // Calculate SL as percentage of range size
-      // This ensures SL is always reasonable and tied to range mechanics
-      buy_sl = g_high_price - (range_size * risk_percentage / 100);
-      sell_sl = g_low_price + (range_size * risk_percentage / 100);
+      // Calculate SL based on risk percentage of balance
+      double account_balance = AccountInfoDouble(ACCOUNT_BALANCE);
+      double risk_amount = account_balance * (risk_percentage / 100);
+      double sl_distance = risk_amount / (g_lot_size * ContractSize());
+      
+      // For buy: SL below entry price (g_high_price)
+      buy_sl = g_high_price - sl_distance;
+      // For sell: SL above entry price (g_low_price)
+      sell_sl = g_low_price + sl_distance;
+      
+      Print("Risk-based SL calculation - Balance: ", account_balance, ", Risk: ", risk_amount, 
+            ", Lot size: ", g_lot_size, ", SL distance: ", sl_distance);
    }
 
    if (take_profit > 0)
@@ -359,6 +365,10 @@ void PlacePendingOrders()
       buy_tp = g_high_price + (range_size * take_profit / 100);
       sell_tp = g_low_price - (range_size * take_profit / 100);
    }
+
+   // Print SL and TP values for debugging
+   Print("Order details - Buy SL: ", buy_sl, ", Buy TP: ", buy_tp, 
+         ", Sell SL: ", sell_sl, ", Sell TP: ", sell_tp);
 
    // Place buy stop order at the high of the range
    trade.SetExpertMagicNumber(magic_number);
@@ -534,7 +544,6 @@ void CloseAllOrders()
    g_orders_placed = false;
    g_buy_ticket = 0;
    g_sell_ticket = 0;
-   g_last_trailing_check = 0;
 }
 
 //+------------------------------------------------------------------+
@@ -544,13 +553,6 @@ void ManageTrailingStop()
 {
    if (trailing_stop <= 0 || trailing_start <= 0)
       return;
-
-   // Only check trailing stop once per minute bar (avoid over-processing on every tick)
-   datetime current_bar_time = iTime(_Symbol, PERIOD_M1, 0);
-   if (g_last_trailing_check == current_bar_time)
-      return;
-   
-   g_last_trailing_check = current_bar_time;
 
    // Check all open positions
    for (int i = 0; i < PositionsTotal(); i++)
